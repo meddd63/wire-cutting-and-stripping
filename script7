@@ -1,0 +1,283 @@
+import threading
+import time
+from pymodbus.client import ModbusSerialClient
+from pymodbus.exceptions import ModbusException
+#import RPi.GPIO as GPIO
+
+client = ModbusSerialClient(method='rtu', port='COM8', baudrate=57600, parity='N', stopbits=1, bytesize=8)
+#/dev/ttyUSB0
+#COM9
+# Initialization
+DIR_PIN=17
+STEP_PIN=22
+ENABLE_PIN=27
+CUTTING_PIN=23
+STRIPPING_PIN=24
+'''
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(DIR_PIN, GPIO.OUT) 
+GPIO.setup(ENABLE_PIN, GPIO.OUT) 
+GPIO.setup(STEP_PIN, GPIO.OUT) 
+GPIO.setup(CUTTING_PIN, GPIO.OUT) 
+GPIO.setup(STRIPPING_PIN, GPIO.OUT)
+''' 
+current_wire = 1
+current_step = 0
+i = 1
+j = 1
+k = 1
+motor_event = threading.Event()
+communication_event = threading.Event()
+stop_event = threading.Event()
+stop_flag = False
+termination_flag = False
+MM_PER_REV = 5 # RECTIFIER
+STEPS_PER_REV = 200  # RECTIFIER
+x0 = 0.5  # RECTIFIER
+x1 = 0.5  # RECTIFIER
+'''''
+GPIO.output(ENABLE_PIN,GPIO.LOW)
+GPIO.output(DIR_PIN,GPIO.LOW)
+GPIO.output(STRIPPING_PIN,GPIO.LOW)
+GPIO.output(CUTTING_PIN,GPIO.LOW)
+'''''
+
+
+
+
+# Define button state variables
+previous_buttons = [False] * 8  # Initialize previous button states
+
+def communication():
+    global previous_buttons, TOTAL_SET, Strip_length_L, Strip_length_R, WIRE_LENGTH, START, RESET, MODE, CONFIRM_DATA, FEED, BACK, CUT_OFF, STRIP, Adr_RESET, Adr_START, adr_CONFIRM_DATA, Adr_FINISHED, Adr_MESSAGES
+
+    try:
+        if client.connect():
+            print("Connected")
+
+            # Define coil and register addresses
+            Adr_START = 0x000
+            Adr_RESET = 0x001
+            Adr_MODE = 0x002
+            adr_CONFIRM_DATA = 0x003
+            Adr_FEED = 0x004
+            Adr_BACK = 0x005
+            Adr_CUT_OFF = 0x006
+            Adr_STRIP = 0x007
+
+            Adr_wire_length = 0x000
+            Adr_Strip_length_R = 0x001
+            Adr_Strip_length_L = 0x002
+            Adr_Total_set = 0x003
+            Adr_FINISHED = 0x004
+            Adr_MESSAGES = 0x005
+
+            while True:
+                # Read coils (buttons)
+                response = client.read_coils(address=Adr_START, count=8, slave=1)
+                if not response.isError():
+                    buttons = response.bits
+
+                    # Check if any button state has changed
+                    if buttons != previous_buttons:
+                        START = buttons[0]
+                        RESET = buttons[1]
+                        MODE = buttons[2]
+                        CONFIRM_DATA = buttons[3]
+                        FEED = buttons[4]
+                        BACK = buttons[5]
+                        CUT_OFF = buttons[6]
+                        STRIP = buttons[7]
+
+                        #print(START, MODE, CONFIRM_DATA)
+                        #print(f"\rstopflag: {stop_flag}")
+                        #print(f"\rterminationflag: {termination_flag}")
+
+                        # Read registers
+                        response_registers = client.read_holding_registers(address=Adr_wire_length, count=6, slave=1)
+                        if not response_registers.isError():
+                            registers = response_registers.registers
+                            WIRE_LENGTH = registers[0]
+                            Strip_length_R = registers[1]
+                            Strip_length_L = registers[2]
+                            TOTAL_SET = registers[3]
+                            FINISHED = registers[4]
+                            MESSAGES = registers[5]
+                            #print(WIRE_LENGTH, Strip_length_L, Strip_length_R, TOTAL_SET)
+                        else:
+                            #print("Error reading registers:", response_registers)
+                            client.write_registers(address=Adr_MESSAGES, values=1, slave=1)
+
+                        # Update previous button states
+                        previous_buttons = buttons
+
+                        communication_event.set()
+                else:
+                    #print("Error reading coils:", response)
+                    client.write_registers(address=Adr_MESSAGES, values=1, slave=1)
+        else:
+            #print("Unable to connect to Modbus slave (HMI)")
+            client.write_registers(address=Adr_MESSAGES, values=2, slave=1)
+
+    except ModbusException as e:
+        #print("Modbus communication error:", e)
+        client.write_registers(address=Adr_MESSAGES, values=3, slave=1)
+
+def turn_motor():
+    global current_step, current_length, termination_flag
+    while current_wire != TOTAL_SET + 1 and not stop_event.is_set():
+        current_length = (current_step * MM_PER_REV / STEPS_PER_REV)
+        print(f"\rCurrent length: {current_length}. Current wire: {current_wire}")  # ADD COMMAND FOR DRIVER
+        '''''
+        GPIO.output(STEP_PIN,GPIO.HIGH)
+        time.sleep(0.001)
+        GPIO.output(STEP_PIN,GPIO.LOW)
+        time.sleep(0.001)
+        
+        time.sleep(0.1)
+        '''''
+        client.write_registers(address=Adr_FINISHED, values=current_wire, slave=1)
+        current_step += 1
+        motor_event.set()
+    termination_flag = True
+
+def strip_wire_left():
+    global i
+    while current_wire != TOTAL_SET + 1 and not stop_event.is_set():
+        motor_event.wait()
+        if current_length == (i * Strip_length_L + (i - 1) * WIRE_LENGTH + (i - 1) * Strip_length_R) + x0:
+            #print("\nStripping wire on the left##############################################")
+            #GPIO.output(STRIPPING_PIN, GPIO.HIGH)
+            #time.sleep(1)
+            #GPIO.output(STRIPPING_PIN, GPIO.LOW)
+            i += 1
+            motor_event.clear()
+
+def strip_wire_right():
+    global k 
+    while current_wire != TOTAL_SET + 1 and not stop_event.is_set():
+        motor_event.wait()
+        if current_length == (k * Strip_length_L + k * WIRE_LENGTH + (k - 1) * Strip_length_R) + x0:
+            #print("\nStripping wire on the right#############################################")  # ADD COMMAND FOR CYLINDER
+            #GPIO.output(STRIPPING_PIN, GPIO.HIGH)
+            #time.sleep(1)
+            #GPIO.output(STRIPPING_PIN, GPIO.LOW)
+            k += 1
+            motor_event.clear()
+
+def cut_wire():
+    global current_wire,j 
+    while current_wire != TOTAL_SET + 1 and not stop_event.is_set():
+        motor_event.wait()
+        if current_length == j * (WIRE_LENGTH + Strip_length_L + Strip_length_R) + x1:
+            #print("\nCutting wire#########################################")  # ADD COMMAND FOR CYLINDER
+            #GPIO.output(CUTTING_PIN, GPIO.HIGH)
+            #time.sleep(1)
+            #GPIO.output(CUTTING_PIN, GPIO.LOW)
+            j += 1
+            motor_event.clear()
+            current_wire += 1
+
+def main():
+    global communication_event, START, MODE, current_wire, current_step, termination_flag,i, j, k
+
+    try:
+        communication_thread = threading.Thread(target=communication)
+        communication_thread.start()
+
+        while True:
+            termination_flag = False
+
+            # Wait for the communication_event to be set
+            communication_event.wait()
+            communication_event.clear()
+
+            if START:
+                print("Starting")
+                stop_event.clear()
+                if not MODE:  # Auto
+                    print("Auto mode")
+                    if CONFIRM_DATA:
+                        # Create and start threads
+                        turn_thread = threading.Thread(target=turn_motor)
+                        strip_thread_right = threading.Thread(target=strip_wire_right)
+                        strip_thread_left = threading.Thread(target=strip_wire_left)
+                        cut_thread = threading.Thread(target=cut_wire)
+
+                        turn_thread.start()
+                        strip_thread_right.start()
+                        strip_thread_left.start()
+                        cut_thread.start()
+
+                        while not termination_flag and START:
+                            time.sleep(0.0001)
+
+                        if current_wire == TOTAL_SET + 1:
+                            print("Done")
+                            i = j = k = 1
+                            current_wire = 1
+                            current_step = 0
+                            client.write_coil(address=adr_CONFIRM_DATA, value=False, slave=1)
+                            client.write_coil(address=Adr_START, value=False, slave=1)
+
+                        if not START:
+                            stop_event.set()
+                            print("stop")
+                            while not RESET and not START and CONFIRM_DATA:
+                                print("Waiting for choice")
+                            if RESET:
+                                i = j = k = 1
+                                client.write_coil(address=adr_CONFIRM_DATA, value=False, slave=1)
+                                client.write_coil(address=Adr_START, value=False, slave=1)
+                                current_wire = 1
+                                current_step = 0
+                                client.write_coil(address=Adr_RESET, value=False, slave=1)
+                            elif START:
+                                stop_event.clear()
+                    else:
+                        print("Press confirm data")
+                        client.write_registers(address=Adr_MESSAGES, values=5, slave=1)
+
+                else:  # Manual mode
+                    if FEED:
+                        print('FEED')
+                        #GPIO.output(STEP_PIN, GPIO.HIGH)
+                        #time.sleep(0.0001)
+                        #GPIO.output(STEP_PIN, GPIO.LOW)
+                    elif BACK:
+                        print('BACK')
+                        #GPIO.output(DIR_PIN, GPIO.HIGH)
+                        #GPIO.output(STEP_PIN, GPIO.HIGH)
+                        #time.sleep(0.0001)
+                        #GPIO.output(STEP_PIN, GPIO.LOW)
+                        #GPIO.output(DIR_PIN, GPIO.LOW)
+                    elif CUT_OFF:
+                        print('CUT_OFF')
+                        #GPIO.output(CUTTING_PIN, GPIO.HIGH)
+                        #time.sleep(0.01)
+                        #GPIO.output(CUTTING_PIN, GPIO.LOW)
+                    elif STRIP:
+                        print('STRIP')
+                        #GPIO.output(STRIPPING_PIN, GPIO.HIGH)
+                        #time.sleep(0.01)
+                        #GPIO.output(STRIPPING_PIN, GPIO.LOW)
+
+            elif not START:
+                print('Stop')
+                stop_event.set()
+                if RESET:
+                    i = j = k = 1
+                    client.write_coil(address=adr_CONFIRM_DATA, value=False, slave=1)
+                    client.write_coil(address=Adr_START, value=False, slave=1)
+                    current_wire = 1
+                    current_step = 0
+                    client.write_coil(address=Adr_RESET, value=False, slave=1)
+
+    except Exception as e:
+        print("Error:", e)
+    finally:
+        print('ok')
+        #GPIO.cleanup()
+
+if __name__ == "__main__":
+    main()
